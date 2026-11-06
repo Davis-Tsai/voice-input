@@ -533,7 +533,7 @@ async function pttStart() {
   if (!state.active) releaseWake();
   if (press.tooShort) return; // 狀態已由 pttEnd 顯示
   if (r.text) { stageText(rz.noteId, r.text); idleStatus(); return; }
-  if (r.cancelled) return idleStatus();
+  if (r.cancelled || press.halted) return idleStatus(); // 自己取消、或切換記錄/模式而中止:不算錯誤
   if (r.needTap) { showNotice("無法開始收音,請再按一次。"); return idleStatus(); }
   if (r.error && r.error !== "aborted") { showNotice(describeError(r.error, r.errorMessage)); return idleStatus(); }
   showNotice(press.tap
@@ -568,6 +568,7 @@ function haltListening() {
   const press = state.ptt;
   if (press) {
     state.ptt = null;
+    press.halted = true;
     press.rz.stop();
   }
 }
@@ -636,4 +637,5 @@ loadNotes();
 state.notes.forEach(drainQueue); // 上次關掉網頁時還在排隊的句子,這次開啟就放進去
 showCurrent();
 // 預設:iPhone/iPad 的 Safari 不允許自動開始聆聽,預設用點擊監聽;其他裝置預設常開監聽
-setMode(localStorage.getItem(KEY.mode) || (isIOS ? "ptt" : "auto"), { save: false });
+const savedMode = localStorage.getItem(KEY.mode);
+setMode(savedMode === "auto" || savedMode === "ptt" ? savedMode : (isIOS ? "ptt" : "auto"), { save: false });

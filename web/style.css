@@ -66,6 +66,9 @@ summary { cursor: pointer; color: var(--muted); }
 
 @media (min-width: 900px) {
   body { max-width: 900px; margin: 0 auto; }
+}
+/* 只有用滑鼠的電腦才放大字;手機、平板(觸控)不論橫放直放,字都一樣大 */
+@media (min-width: 900px) and (pointer: fine) {
   #pad { font-size: 1.9rem; line-height: 1.5; }
   #draft { font-size: 1.2rem; }
 }
