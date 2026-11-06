@@ -385,6 +385,10 @@ function createRecognizer(continuous, onAudioStart) {
   r.onstart = () => dbg("辨識 start");
   r.onaudiostart = () => { dbg("辨識 audiostart(麥克風開始收音)"); onAudioStart?.(); };
   r.onspeechstart = () => dbg("辨識 speechstart(偵測到說話)");
+  r.onsoundstart = () => dbg("辨識 soundstart(聽到聲音)");
+  r.onspeechend = () => dbg("辨識 speechend");
+  r.onaudioend = () => dbg("辨識 audioend(麥克風關閉)");
+  r.onnomatch = () => dbg("辨識 nomatch");
   r.onresult = (e) => {
     results = [...e.results];
     const t = textOf();
@@ -407,7 +411,7 @@ function createRecognizer(continuous, onAudioStart) {
     const prev = state.prevEnded;
     state.prevEnded = rz.ended;
     if (prev) await Promise.race([prev, sleep(1500)]);
-    if (isIOS) await sleep(300);
+    if (isIOS) await sleep(500);
     if (rz.cancelled) { // 等待期間已經被取消
       markEnded();
       finish({ text: "", ms: 0, cancelled: true });
@@ -425,6 +429,50 @@ function createRecognizer(continuous, onAudioStart) {
     try { r.stop(); } catch { /* 已結束 */ }
   };
   return rz;
+}
+
+/** 一小段無聲的 wav(只有檔頭和 0 值取樣)。 */
+let silentUrl = null;
+function makeSilentWavUrl(ms = 120) {
+  const rate = 8000;
+  const n = Math.round((rate * ms) / 1000);
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+/**
+ * iPhone 的 Safari 第二次收音時,常常「麥克風開了卻聽不到聲音」(音訊系統還停在上一次的收音狀態)。
+ * 每次收音前,在點擊的當下先播一小段無聲音訊和無聲朗讀,讓它切回播放狀態,再開始收音。
+ * 這個函式要在點擊的當下呼叫(iPhone 只允許使用者操作時開始播放)。回傳的 Promise 在播完(或逾時)後完成。
+ */
+function iosResetAudio() {
+  try {
+    const u = new SpeechSynthesisUtterance("。");
+    u.volume = 0;
+    u.lang = "zh-TW";
+    speechSynthesis?.speak(u);
+  } catch { /* 不支援就算了 */ }
+  return new Promise((resolve) => {
+    let timer;
+    const done = () => { clearTimeout(timer); resolve(); };
+    timer = setTimeout(() => { dbg("iOS 重置音訊:逾時"); done(); }, 800);
+    try {
+      silentUrl ??= makeSilentWavUrl();
+      const a = new Audio(silentUrl);
+      a.onended = done;
+      a.onerror = done;
+      a.play().then(() => dbg("iOS 重置音訊:播放無聲音訊"), (e) => { dbg(`iOS 重置音訊失敗:${e.name}`); done(); });
+    } catch (e) {
+      dbg(`iOS 重置音訊例外:${e.message}`);
+      done();
+    }
+  });
 }
 
 async function keepAwake() {
@@ -517,6 +565,7 @@ async function pttStart() {
   if (!SR) { showNotice("這個瀏覽器不支援語音辨識。請點進記事紙,用鍵盤上的麥克風聽寫或直接打字。"); return; }
   if (!navigator.onLine) { setStatus("沒有網路", "error"); return; }
   keepAwake();
+  const audioReset = isIOS ? iosResetAudio() : null; // 要在點擊的當下呼叫,所以放在第一個 await 之前
   const press = { tap: tapMode, startedAt: Date.now(), tooShort: false, released: false };
   const rz = createRecognizer(!tapMode, () => {
     if (state.ptt === press) setStatus(tapMode ? "請說話…(說完停頓,或按「停止」)" : "請說話…(說完放開)", "listen");
@@ -526,6 +575,7 @@ async function pttStart() {
   updateButtons();
   setStatus("準備中…", "think");
   dbg(`pttStart(continuous=${!tapMode})`);
+  if (audioReset) await audioReset;
   rz.start();
   const r = await rz.done;
   if (state.ptt === press) state.ptt = null;
