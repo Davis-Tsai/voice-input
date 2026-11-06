@@ -510,12 +510,19 @@ async function iosSpeakBack(text) {
   const since = Date.now() - (state.lastEndAt || 0);
   if (since < 600) await sleep(600 - since);
   if (token !== state.speakToken || state.ptt) return; // 這段時間內又按了「開始」
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "zh-TW";
-  u.rate = 1.2;
-  u.onstart = () => dbg(`iOS 朗讀:${text}`);
-  u.onerror = (e) => dbg(`iOS 朗讀 error:${e.error || ""}`);
-  speechSynthesis.speak(u);
+  // 回傳的 Promise 在念完(或逾時、被取消)時完成:常開監聽要等念完才能再開麥克風
+  await new Promise((resolve) => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "zh-TW";
+    u.rate = 1.2;
+    let timer;
+    const fin = () => { clearTimeout(timer); resolve(); };
+    timer = setTimeout(fin, Math.max(3000, text.length * 500)); // 有些瀏覽器不會觸發 onend
+    u.onstart = () => dbg(`iOS 朗讀:${text}`);
+    u.onend = fin;
+    u.onerror = (e) => { dbg(`iOS 朗讀 error:${e.error || ""}`); fin(); };
+    speechSynthesis.speak(u);
+  });
 }
 
 async function keepAwake() {
@@ -536,6 +543,7 @@ async function session() {
   updateButtons();
   keepAwake();
   showNotice("");
+  if (isIOS) iosResetAudio(); // 要在點擊的當下呼叫(第一個 await 之前),iPhone 才允許之後的朗讀
 
   let fails = 0; // 連續「立刻結束、沒有聽到任何東西」的次數,避免默默空轉
   while (alive()) {
@@ -543,6 +551,11 @@ async function session() {
       setStatus("沒有網路,等待連線中…", "error");
       await sleep(1000);
       continue;
+    }
+    // iPhone 的 Safari 朗讀完立刻開麥克風,常常會被判定為「靜音」,等一下再開(參考專案也是這樣)
+    if (isIOS) {
+      await sleep(900);
+      if (!alive()) break;
     }
     setStatus("聆聽中…", "listen");
     const rz = createRecognizer(false, () => { if (alive()) setStatus("聆聽中…請說話", "listen"); });
@@ -553,6 +566,10 @@ async function session() {
     if (r.text) { // 就算剛按了「停止」,已經聽到的話也要記下來
       stageText(rz.noteId, r.text);
       fails = 0;
+      if (alive() && isIOS) { // iPhone:念出來並等念完才再聽(念的時候麥克風是關的),下一輪收音才不會被靜音
+        setStatus("朗讀中", "think");
+        await iosSpeakBack(SAY === "ok" ? "好" : r.text);
+      }
     }
     if (!alive()) break;
     if (r.text) continue;
@@ -581,6 +598,7 @@ function stopSession() {
   state.active = false;
   state.epoch++;
   state.rz?.stop();
+  if (isIOS) { state.speakToken++; try { speechSynthesis?.cancel(); } catch { /* 不支援就算了 */ } }
   releaseWake();
   setStatus("已停止", "idle");
   updateButtons();
