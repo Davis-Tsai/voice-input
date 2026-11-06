@@ -36,6 +36,7 @@ const state = {
   ptt: null,        // 按住說話進行中的 {rz, tap, startedAt, ...}
   prevEnded: null,  // 最近一次辨識結束的 Promise,新的辨識要等它
   lastEndAt: 0,     // 最近一次辨識結束的時間
+  audioDirty: false, // iPhone:最近一次收音結束後,還沒有朗讀過(音訊還停在「收音」)
   speakToken: 0,    // iPhone 朗讀:每次按「開始」或開始新的朗讀就加一,舊的朗讀看到編號變了就不念
   wake: null,
 };
@@ -408,6 +409,7 @@ function createRecognizer(continuous, onAudioStart) {
     const ms = Date.now() - t0;
     dbg(`辨識 end(${ms} 毫秒,${textOf() ? "有結果" : "沒結果"})`);
     state.lastEndAt = Date.now();
+    state.audioDirty = true; // 收音剛結束,音訊還停在「收音」;之後有念出聲才會清掉
     markEnded();
     finish({ text: textOf(), error, errorMessage, ms });
   };
@@ -510,19 +512,35 @@ async function iosSpeakBack(text) {
   const since = Date.now() - (state.lastEndAt || 0);
   if (since < 600) await sleep(600 - since);
   if (token !== state.speakToken || state.ptt) return; // 這段時間內又按了「開始」
-  // 回傳的 Promise 在念完(或逾時、被取消)時完成:常開監聽要等念完才能再開麥克風
-  await new Promise((resolve) => {
+  await speakNow(text);
+}
+
+/** 馬上念一段話,回傳的 Promise 在念完(或逾時、被取消)時完成。念出聲代表 iPhone 的音訊已經從「收音」切回「播放」。 */
+function speakNow(text) {
+  return new Promise((resolve) => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "zh-TW";
     u.rate = 1.2;
     let timer;
     const fin = () => { clearTimeout(timer); resolve(); };
     timer = setTimeout(fin, Math.max(3000, text.length * 500)); // 有些瀏覽器不會觸發 onend
-    u.onstart = () => dbg(`iOS 朗讀:${text}`);
+    u.onstart = () => { state.audioDirty = false; dbg(`iOS 朗讀:${text}`); };
     u.onend = fin;
     u.onerror = (e) => { dbg(`iOS 朗讀 error:${e.error || ""}`); fin(); };
     speechSynthesis.speak(u);
   });
+}
+
+/**
+ * 上一次收音結束後如果沒有跟著朗讀(例如按「停止」、切換模式或切換記錄,把收音直接中止),
+ * iPhone 的音訊還停在「收音」,這時直接收音會被靜音。開始收音前先念一聲「請說」把它切回來,
+ * 同時也提示可以開始說話。要在點擊的當下之後呼叫。
+ */
+async function iosPrime() {
+  if (!isIOS || IOS_STRATEGY !== "speak" || !window.speechSynthesis || !state.audioDirty) return;
+  const since = Date.now() - (state.lastEndAt || 0);
+  if (since < 600) await sleep(600 - since);
+  await speakNow("請說");
 }
 
 async function keepAwake() {
@@ -544,6 +562,12 @@ async function session() {
   keepAwake();
   showNotice("");
   if (isIOS) iosResetAudio(); // 要在點擊的當下呼叫(第一個 await 之前),iPhone 才允許之後的朗讀
+
+  if (isIOS) {
+    setStatus("準備中…", "think");
+    await iosPrime();
+    if (!alive()) return;
+  }
 
   let fails = 0; // 連續「立刻結束、沒有聽到任何東西」的次數,避免默默空轉
   while (alive()) {
@@ -637,6 +661,7 @@ async function pttStart() {
   setStatus("準備中…", "think");
   dbg(`pttStart(continuous=${!tapMode})`);
   if (audioReset) await audioReset;
+  if (!rz.cancelled) await iosPrime();
   rz.start();
   const r = await rz.done;
   if (state.ptt === press) state.ptt = null;
