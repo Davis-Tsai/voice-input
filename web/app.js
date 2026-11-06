@@ -35,6 +35,8 @@ const state = {
   rz: null,         // 常開監聽目前這一輪的辨識
   ptt: null,        // 按住說話進行中的 {rz, tap, startedAt, ...}
   prevEnded: null,  // 最近一次辨識結束的 Promise,新的辨識要等它
+  lastEndAt: 0,     // 最近一次辨識結束的時間
+  speakToken: 0,    // iPhone 朗讀:每次按「開始」或開始新的朗讀就加一,舊的朗讀看到編號變了就不念
   wake: null,
 };
 
@@ -367,6 +369,7 @@ function createRecognizer(continuous, onAudioStart) {
   // ?ios=reuse:iPhone 上整個網頁共用同一個辨識物件,不每次重新建立
   const r = isIOS && IOS_STRATEGY === "reuse" ? (sharedRec ??= new SR()) : new SR();
   r.lang = "zh-TW";
+  if (isIOS) r.maxAlternatives = 3; // 和參考專案一致
   r.interimResults = true; // 結束時若沒有「最終」結果(iPhone 常見),就用最後一個暫時結果
   r.continuous = continuous;
   const rz = { rec: r, started: false, cancelled: false, noteId: state.curId };
@@ -404,6 +407,7 @@ function createRecognizer(continuous, onAudioStart) {
   r.onend = () => {
     const ms = Date.now() - t0;
     dbg(`辨識 end(${ms} 毫秒,${textOf() ? "有結果" : "沒結果"})`);
+    state.lastEndAt = Date.now();
     markEnded();
     finish({ text: textOf(), error, errorMessage, ms });
   };
@@ -433,11 +437,12 @@ function createRecognizer(continuous, onAudioStart) {
 }
 
 // iPhone 收音的幾種處理方式,用網址參數 ?ios=… 切換,方便在手機上比較哪一種最穩:
-//   (不加)  每次收音前播一小段無聲音訊
+//   (不加) = speak  和參考專案一樣:每次收音結束後把辨識到的句子念出來,下一次收音才不會被 iPhone 靜音
+//   silent  每次收音前播一小段無聲音訊(試過,第二次之後常常沒反應)
 //   beep    改播一聲很短的提示音(讓音訊系統真的切到播放再切回收音)
 //   reuse   整個網頁共用同一個辨識物件
 //   reload  每次收音結束後自動重新載入網頁(記錄都存在瀏覽器裡,不會遺失)
-const IOS_STRATEGY = new URLSearchParams(location.search).get("ios") || "default";
+const IOS_STRATEGY = new URLSearchParams(location.search).get("ios") || "speak";
 let sharedRec = null;
 if (isIOS) dbg(`iOS 策略:${IOS_STRATEGY}`);
 
@@ -466,12 +471,15 @@ function makeWavUrl(ms, freq = 0, amp = 0) {
  * 這個函式要在點擊的當下呼叫(iPhone 只允許使用者操作時開始播放)。回傳的 Promise 在播完(或逾時)後完成。
  */
 function iosResetAudio() {
+  state.speakToken++; // 作廢還在等著要念的上一句
   try {
     const u = new SpeechSynthesisUtterance("。");
     u.volume = 0;
     u.lang = "zh-TW";
-    speechSynthesis?.speak(u);
+    speechSynthesis?.speak(u); // 在點擊的當下送出無聲朗讀,解鎖之後的朗讀(iPhone 只允許使用者操作時開始)
+    if (IOS_STRATEGY === "speak") speechSynthesis?.cancel(); // 和參考專案一樣:隨即取消,正在念的內容也一併停止
   } catch { /* 不支援就算了 */ }
+  if (IOS_STRATEGY === "speak") return Promise.resolve();
   return new Promise((resolve) => {
     let timer;
     const done = () => { clearTimeout(timer); resolve(); };
@@ -488,6 +496,24 @@ function iosResetAudio() {
       done();
     }
   });
+}
+
+/**
+ * iPhone:收音結束後,等音訊從「收音」切回「播放」(約 0.6 秒),再把句子念出來。
+ * 每次收音之間有朗讀播放,下一次收音才不會被 iPhone 直接靜音(參考專案就是這樣運作)。
+ */
+async function iosSpeakBack(text) {
+  if (!isIOS || IOS_STRATEGY !== "speak" || !window.speechSynthesis) return;
+  const token = ++state.speakToken;
+  const since = Date.now() - (state.lastEndAt || 0);
+  if (since < 600) await sleep(600 - since);
+  if (token !== state.speakToken || state.ptt) return; // 這段時間內又按了「開始」
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "zh-TW";
+  u.rate = 1.2;
+  u.onstart = () => dbg(`iOS 朗讀:${text}`);
+  u.onerror = (e) => dbg(`iOS 朗讀 error:${e.error || ""}`);
+  speechSynthesis.speak(u);
 }
 
 async function keepAwake() {
@@ -605,14 +631,19 @@ async function pttStart() {
     setTimeout(() => { if (!isEditing()) location.reload(); }, 900);
     return;
   }
-  if (r.text) { stageText(rz.noteId, r.text); idleStatus(); return; }
+  if (r.text) { stageText(rz.noteId, r.text); idleStatus(); iosSpeakBack(r.text); return; }
   if (r.cancelled || press.halted) return idleStatus(); // 自己取消、或切換記錄/模式而中止:不算錯誤
   if (r.needTap) { showNotice("無法開始收音,請再按一次。"); return idleStatus(); }
-  if (r.error && r.error !== "aborted") { showNotice(describeError(r.error, r.errorMessage)); return idleStatus(); }
+  if (r.error && r.error !== "aborted") {
+    showNotice(describeError(r.error, r.errorMessage));
+    if (r.error === "no-speech") iosSpeakBack("沒聽到,請再說一次");
+    return idleStatus();
+  }
   showNotice(press.tap
     ? "沒有收到辨識結果,請再按「開始」說話。"
     : "沒有收到辨識結果。請按住後等畫面出現「請說話」再開口,並靠近麥克風、說大聲一點。");
   setStatus("沒聽到聲音,請再試一次", "error");
+  iosSpeakBack("沒聽到,請再說一次");
 }
 
 function pttEnd() {
