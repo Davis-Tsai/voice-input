@@ -25,6 +25,7 @@ main { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; 
   font: inherit; font-size: 1.05rem; line-height: 1.5; color: inherit;
   background: #f1faf3; border: 2px solid var(--listen); border-radius: 12px;
 }
+#draft::placeholder { font-size: .85rem; line-height: 1.4; }
 #draft:focus { outline: 2px solid var(--speak); outline-offset: 1px; }
 .stageBtns { display: flex; flex-direction: column; gap: 6px; }
 .stageBtns button { flex: 1; font-weight: 700; padding: 0 16px; }
