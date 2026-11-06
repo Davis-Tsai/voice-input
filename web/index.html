@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>語音記錄</title>
+  <link rel="stylesheet" href="style.css?v=__BUILD__">
+</head>
+<body>
+  <header>
+    <div id="status" class="idle">尚未開始</div>
+    <div id="heard"></div>
+    <div id="notice" hidden></div>
+  </header>
+
+  <main>
+    <textarea id="pad" spellcheck="false" placeholder="按下「開始」後說話,辨識到的內容會一句一行記錄在這裡。這張紙可以直接點進去修改。"></textarea>
+    <div id="queueHint" class="hint" hidden></div>
+    <div class="stage">
+      <textarea id="draft" rows="2" spellcheck="false" enterkeyhint="done" placeholder="剛辨識到的一句會先出現在這裡,可以直接改。按「增加」或說下一句,就存進內文;按「刪除」或說「刪除」,整句丟掉。"></textarea>
+      <div class="stageBtns">
+        <button id="addBtn" disabled>增加</button>
+        <button id="discardBtn" disabled>刪除</button>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="notes">
+      <select id="noteSel" aria-label="記錄清單"></select>
+      <button id="newBtn">新增</button>
+      <button id="delBtn">刪除記錄</button>
+    </div>
+
+    <div class="mode" role="radiogroup" aria-label="聆聽模式">
+      <label><input type="radio" name="mode" value="auto"><span>常開監聽</span></label>
+      <label><input type="radio" name="mode" value="ptt"><span>按住說話</span></label>
+    </div>
+
+    <div class="bar">
+      <button id="micBtn" class="primary">開始</button>
+      <button id="copyBtn">複製</button>
+      <button id="downloadBtn">下載</button>
+      <button id="clearBtn">清除</button>
+    </div>
+
+    <details>
+      <summary>設定</summary>
+      <div class="settings">
+        <div class="hint" id="version"></div>
+        <details id="debugBox" hidden>
+          <summary>診斷紀錄(語音辨識有問題時,請把這裡的內容截圖給開發者)</summary>
+          <pre id="debug"></pre>
+        </details>
+        <p class="hint">
+          記錄的內容只存在這台裝置的瀏覽器裡(重新整理不會消失),不會上傳到任何伺服器。<br>
+          語音辨識由瀏覽器的語音服務處理(Chrome/Edge 為 Google、Safari 為 Apple),需要網路。
+        </p>
+      </div>
+    </details>
+  </footer>
+
+  <script type="module" src="app.js?v=__BUILD__"></script>
+</body>
+</html>
