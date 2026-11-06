@@ -24,7 +24,7 @@ const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platfor
 // 手機瀏覽器切到「電腦版網站」時,User-Agent 不再有 Android;主要輸入裝置是觸控(pointer: coarse)的也算手機
 const isPhone = isIOS || /Android/i.test(navigator.userAgent)
   || (navigator.maxTouchPoints > 0 && matchMedia("(pointer: coarse)").matches);
-const KEY = { notes: "vi.notes.v1", cur: "vi.cur.v1", mode: "vi.mode.v1" };
+const KEY = { notes: "vi.notes.v1", cur: "vi.cur.v1", mode: "vi.mode.v1", kwOn: "vi.kwon.v1", kwWord: "vi.kwword.v1" };
 
 const state = {
   notes: [],        // [{id, created, text}],依建立時間由舊到新
@@ -36,6 +36,8 @@ const state = {
   ptt: null,        // 按住說話進行中的 {rz, tap, startedAt, ...}
   prevEnded: null,  // 最近一次辨識結束的 Promise,新的辨識要等它
   lastEndAt: 0,     // 最近一次辨識結束的時間
+  kwOn: false,      // 常開監聽:只記錄以關鍵字開頭的句子(預設關)
+  kwWord: "記錄",   // 關鍵字
   audioDirty: false, // iPhone:最近一次收音結束後,還沒有朗讀過(音訊還停在「收音」)
   speakToken: 0,    // iPhone 朗讀:每次按「開始」或開始新的朗讀就加一,舊的朗讀看到編號變了就不念
   wake: null,
@@ -194,6 +196,32 @@ function deleteLatest(note) {
   } else {
     setHeard("暫存欄是空的,沒有可以刪除的");
   }
+}
+
+// ───────────── 關鍵字(常開監聽,防止別人的話被記進去)─────────────
+
+const KW_LEAD = /^[\s,。,.、:;:!!??「」『』]+/;
+/** 「紀」「記」同音,辨識引擎可能輸出任何一個,比對前統一(長度不變,不影響內容)。 */
+const kwNorm = (t) => t.replace(/紀/g, "記").toLowerCase();
+
+/**
+ * 回傳要存進暫存欄的文字;沒說關鍵字、或只說了關鍵字沒有內容,就回傳 null(整句丟掉)。
+ * 沒開這個功能,或整句只有「刪除」(指令不需要關鍵字),原句照存。
+ */
+function applyKeyword(text) {
+  if (!state.kwOn || isDeleteCommand(text)) return text;
+  const kw = state.kwWord;
+  const body = text.replace(KW_LEAD, "");
+  if (kwNorm(body.slice(0, kw.length)) !== kwNorm(kw)) {
+    setHeard(`略過(沒有以「${kw}」開頭):${text}`);
+    return null;
+  }
+  const content = body.slice(kw.length).replace(KW_LEAD, "").trim();
+  if (!content) {
+    setHeard(`只聽到「${kw}」,請連著說內容`);
+    return null;
+  }
+  return content;
 }
 
 /** 排隊的句子依序放進暫存欄:每放一句,前一句(沒按「增加」也一樣)先存進內文,最後一句留在暫存欄。 */
@@ -506,21 +534,22 @@ function iosResetAudio() {
  * iPhone:收音結束後,等音訊從「收音」切回「播放」(約 0.6 秒),再把句子念出來。
  * 每次收音之間有朗讀播放,下一次收音才不會被 iPhone 直接靜音(參考專案就是這樣運作)。
  */
-async function iosSpeakBack(text) {
+async function iosSpeakBack(text, opts) {
   if (!isIOS || IOS_STRATEGY !== "speak" || !window.speechSynthesis) return;
   const token = ++state.speakToken;
   const since = Date.now() - (state.lastEndAt || 0);
   if (since < 600) await sleep(600 - since);
   if (token !== state.speakToken || state.ptt) return; // 這段時間內又按了「開始」
-  await speakNow(text);
+  await speakNow(text, opts);
 }
 
 /** 馬上念一段話,回傳的 Promise 在念完(或逾時、被取消)時完成。念出聲代表 iPhone 的音訊已經從「收音」切回「播放」。 */
-function speakNow(text) {
+function speakNow(text, { volume = 1 } = {}) {
   return new Promise((resolve) => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "zh-TW";
     u.rate = 1.2;
+    u.volume = volume;
     let timer;
     const fin = () => { clearTimeout(timer); resolve(); };
     timer = setTimeout(fin, Math.max(3000, text.length * 500)); // 有些瀏覽器不會觸發 onend
@@ -582,17 +611,20 @@ async function session() {
       if (!alive()) break;
     }
     setStatus("聆聽中…", "listen");
-    const rz = createRecognizer(false, () => { if (alive()) setStatus("聆聽中…請說話", "listen"); });
+    const rz = createRecognizer(false, () => { if (alive()) setStatus(state.kwOn ? `聆聽中…請說「${state.kwWord}」開頭` : "聆聽中…請說話", "listen"); });
     state.rz = rz;
     rz.start();
     const r = await rz.done;
     if (state.rz === rz) state.rz = null;
     if (r.text) { // 就算剛按了「停止」,已經聽到的話也要記下來
-      stageText(rz.noteId, r.text);
+      const kept = applyKeyword(r.text);
       fails = 0;
+      if (kept !== null) stageText(rz.noteId, kept);
       if (alive() && isIOS) { // iPhone:念出來並等念完才再聽(念的時候麥克風是關的),下一輪收音才不會被靜音
         setStatus("朗讀中", "think");
-        await iosSpeakBack(SAY === "ok" ? "好" : r.text);
+        // 被略過的句子也要有一聲(很小聲):不然音訊停在收音狀態,下一輪收音會被靜音
+        if (kept !== null) await iosSpeakBack(SAY === "ok" ? "好" : kept);
+        else await iosSpeakBack("嗯", { volume: 0.25 });
       }
     }
     if (!alive()) break;
@@ -770,6 +802,20 @@ document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListene
 
 document.addEventListener("visibilitychange", () => {
   if (state.active && document.visibilityState === "visible") keepAwake();
+});
+
+// 關鍵字設定(存在這台裝置的瀏覽器)
+state.kwOn = localStorage.getItem(KEY.kwOn) === "1";
+state.kwWord = localStorage.getItem(KEY.kwWord) || "記錄";
+$("kwOn").checked = state.kwOn;
+$("kwWord").value = state.kwWord;
+$("kwOn").addEventListener("change", (e) => {
+  state.kwOn = e.target.checked;
+  localStorage.setItem(KEY.kwOn, state.kwOn ? "1" : "0");
+});
+$("kwWord").addEventListener("input", (e) => {
+  state.kwWord = e.target.value.trim() || "記錄"; // 清空時用預設的「記錄」
+  localStorage.setItem(KEY.kwWord, state.kwWord);
 });
 
 // ───────────── 啟動 ─────────────
