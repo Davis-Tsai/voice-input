@@ -444,6 +444,8 @@ function createRecognizer(continuous, onAudioStart) {
 //   reload  每次收音結束後自動重新載入網頁(記錄都存在瀏覽器裡,不會遺失)
 const IOS_STRATEGY = new URLSearchParams(location.search).get("ios") || "speak";
 let sharedRec = null;
+// iPhone 辨識完念什麼:預設把句子念出來;?say=ok 只念「好」(比較不吵,是否仍能讓下一次收音正常要實測)
+const SAY = new URLSearchParams(location.search).get("say") || "full";
 if (isIOS) dbg(`iOS 策略:${IOS_STRATEGY}`);
 
 /** 產生一小段 wav:amp 為 0 就是無聲(只有檔頭和 0 值取樣),否則是 freq Hz 的短音。 */
@@ -631,7 +633,7 @@ async function pttStart() {
     setTimeout(() => { if (!isEditing()) location.reload(); }, 900);
     return;
   }
-  if (r.text) { stageText(rz.noteId, r.text); idleStatus(); iosSpeakBack(r.text); return; }
+  if (r.text) { stageText(rz.noteId, r.text); idleStatus(); iosSpeakBack(SAY === "ok" ? "好" : r.text); return; }
   if (r.cancelled || press.halted) return idleStatus(); // 自己取消、或切換記錄/模式而中止:不算錯誤
   if (r.needTap) { showNotice("無法開始收音,請再按一次。"); return idleStatus(); }
   if (r.error && r.error !== "aborted") {
