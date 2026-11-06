@@ -364,7 +364,8 @@ function describeError(code, message = "") {
  * rz.noteId 是開始說話時所屬的記錄。rz.stop() 會讓已經聽到的內容照樣交出來(不會丟掉剛說的話)。
  */
 function createRecognizer(continuous, onAudioStart) {
-  const r = new SR();
+  // ?ios=reuse:iPhone 上整個網頁共用同一個辨識物件,不每次重新建立
+  const r = isIOS && IOS_STRATEGY === "reuse" ? (sharedRec ??= new SR()) : new SR();
   r.lang = "zh-TW";
   r.interimResults = true; // 結束時若沒有「最終」結果(iPhone 常見),就用最後一個暫時結果
   r.continuous = continuous;
@@ -431,10 +432,19 @@ function createRecognizer(continuous, onAudioStart) {
   return rz;
 }
 
-/** 一小段無聲的 wav(只有檔頭和 0 值取樣)。 */
-let silentUrl = null;
-function makeSilentWavUrl(ms = 120) {
-  const rate = 8000;
+// iPhone 收音的幾種處理方式,用網址參數 ?ios=… 切換,方便在手機上比較哪一種最穩:
+//   (不加)  每次收音前播一小段無聲音訊
+//   beep    改播一聲很短的提示音(讓音訊系統真的切到播放再切回收音)
+//   reuse   整個網頁共用同一個辨識物件
+//   reload  每次收音結束後自動重新載入網頁(記錄都存在瀏覽器裡,不會遺失)
+const IOS_STRATEGY = new URLSearchParams(location.search).get("ios") || "default";
+let sharedRec = null;
+if (isIOS) dbg(`iOS 策略:${IOS_STRATEGY}`);
+
+/** 產生一小段 wav:amp 為 0 就是無聲(只有檔頭和 0 值取樣),否則是 freq Hz 的短音。 */
+const wavUrls = {};
+function makeWavUrl(ms, freq = 0, amp = 0) {
+  const rate = 16000;
   const n = Math.round((rate * ms) / 1000);
   const buf = new ArrayBuffer(44 + n * 2);
   const v = new DataView(buf);
@@ -443,6 +453,10 @@ function makeSilentWavUrl(ms = 120) {
   v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
   v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   w(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const fade = Math.min(1, i / 400, (n - i) / 400); // 頭尾淡入淡出,避免爆音
+    v.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * amp * fade * 32767), true);
+  }
   return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
 }
 
@@ -463,11 +477,12 @@ function iosResetAudio() {
     const done = () => { clearTimeout(timer); resolve(); };
     timer = setTimeout(() => { dbg("iOS 重置音訊:逾時"); done(); }, 800);
     try {
-      silentUrl ??= makeSilentWavUrl();
-      const a = new Audio(silentUrl);
+      const beep = IOS_STRATEGY === "beep";
+      wavUrls[beep] ??= beep ? makeWavUrl(150, 880, 0.3) : makeWavUrl(120);
+      const a = new Audio(wavUrls[beep]);
       a.onended = done;
       a.onerror = done;
-      a.play().then(() => dbg("iOS 重置音訊:播放無聲音訊"), (e) => { dbg(`iOS 重置音訊失敗:${e.name}`); done(); });
+      a.play().then(() => dbg(`iOS 重置音訊:播放${beep ? "提示音" : "無聲音訊"}`), (e) => { dbg(`iOS 重置音訊失敗:${e.name}`); done(); });
     } catch (e) {
       dbg(`iOS 重置音訊例外:${e.message}`);
       done();
@@ -582,6 +597,14 @@ async function pttStart() {
   updateButtons();
   if (!state.active) releaseWake();
   if (press.tooShort) return; // 狀態已由 pttEnd 顯示
+  const softEnd = !r.error || r.error === "aborted" || r.error === "no-speech"; // 權限、網路等真正的錯誤要留在畫面上讓人看到
+  if (isIOS && IOS_STRATEGY === "reload" && softEnd && !r.cancelled && !press.halted) {
+    // 試驗用:iPhone 每次收音結束都重新載入網頁,下一次收音就是「網頁剛開啟的第一次」
+    if (r.text) stageText(rz.noteId, r.text);
+    dbg("iOS 收音結束,重新載入網頁");
+    setTimeout(() => { if (!isEditing()) location.reload(); }, 900);
+    return;
+  }
   if (r.text) { stageText(rz.noteId, r.text); idleStatus(); return; }
   if (r.cancelled || press.halted) return idleStatus(); // 自己取消、或切換記錄/模式而中止:不算錯誤
   if (r.needTap) { showNotice("無法開始收音,請再按一次。"); return idleStatus(); }
