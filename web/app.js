@@ -273,9 +273,10 @@ $("discardBtn").addEventListener("click", () => {
 });
 
 $("noteSel").addEventListener("change", (e) => {
+  const id = e.target.value; // 先記下選了哪一份:下面存內文時會重畫選單,選單的值會被蓋回舊的
   haltListening();
   flushNote(curNote()); // 離開這份之前,暫存欄和排隊的句子先存進內文
-  state.curId = e.target.value;
+  state.curId = id;
   showCurrent();
   idleStatus();
 });
